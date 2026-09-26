@@ -1,0 +1,10 @@
+[package]
+name = "fatbin-util"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+libc = "0.2"
+object = "0.40"
+bytemuck = { version = "1.25", features = ["derive"] }
