@@ -261,7 +261,7 @@ fn dump_entry(entry: &FatBinEntry, data: &[u8]) {
 
     separator();
     for (i, w64) in payload.chunks_exact(8).enumerate() {
-        println!("{:08x}: {:016x}", i * 8, read_le64(w64, 0x0));
+        println!("{:08x}: {:016x}", *payload_offset + i * 8, read_le64(w64, 0x0));
     }
     separator();
 }
@@ -285,7 +285,7 @@ fn print_entry_sections(sections: &Vec<String>) {
     separator();
 }
 
-fn dump_entry_section(entry: &FatBinEntry, data: &[u8], section: &str) {
+fn dump_entry_section(entry: &FatBinEntry, data: &[u8], section: &str) -> Option<(usize, usize)> {
     separator();
     if let Ok(elf) = get_entry_elf(entry, data) {
         if let Some(sec) = elf.section_by_name(section) {
@@ -293,18 +293,51 @@ fn dump_entry_section(entry: &FatBinEntry, data: &[u8], section: &str) {
             let data_start = entry.payload_offset + sec_start as usize;
             let sec_data = &data[data_start..data_start + sec_size as usize];
             for (i, w64) in sec_data.chunks_exact(8).enumerate() {
-                println!("{:08x}: {:016x}", i * 8, read_le64(w64, 0x0));
+                println!("{:08x}: {:016x}", data_start + i * 8, read_le64(w64, 0x0));
             }
+            separator();
+            return Some((data_start, data_start + sec_size as usize));
         }
     } else {
         println!("Payload is not an ELF file.")
+    }
+    separator();
+    None
+}
+
+fn modify_entry_section(entry: &FatBinEntry, data: &mut [u8], section: &str) {
+    let mut buf = String::new();
+    let (start, end) = dump_entry_section(entry, data, section).unwrap();
+    print!("Select address to modify: ");
+    io::stdout().flush().unwrap();
+    io::stdin().read_line(&mut buf).unwrap();
+    if let Ok(addr) = u64::from_str_radix(&buf.trim(), 16) {
+        if ((addr as usize) < start) || ((addr as usize) >= end) {
+            separator();
+            println!("Address not in section range: {:#08x}..{:#08x}", start, end);
+        } else {
+            buf.clear();
+            separator();
+            print!("Type in new value: ");
+            io::stdout().flush().unwrap();
+            io::stdin().read_line(&mut buf).unwrap();
+            if let Ok(new) = u64::from_str_radix(&buf.trim(), 16) {
+                data[addr as usize..(addr as usize) + 8].copy_from_slice(&new.to_le_bytes());
+            } else {
+                separator();
+                println!("Invalid input: {}", buf.trim());
+            }
+        }
+    } else {
+        separator();
+        println!("Invalid input: {}", buf.trim());
     }
     separator();
 }
 
 fn main() -> io::Result<()> {
     let args = Args::parse();
-    let data = std::fs::read(&args.binary)?;
+    let mut data = std::fs::read(&args.binary)?;
     let elf = ElfFile64::<Endianness>::parse(&*data).unwrap();
 
     let fatbins: Vec<FatBin> = get_fatbin_ptrs(&elf, &data)
@@ -320,34 +353,40 @@ fn main() -> io::Result<()> {
         let mut invalid = 0;
         let mut buf = String::new();
 
-        println!("[1] Print FatBin info");
-        println!("[2] Select FatBin");
+        println!("[ 1] Print FatBin info");
+        println!("[ 2] Select FatBin");
 
         if fatbin != -1 {
-            println!("[3] Print FatBin[{}] entries", fatbin);
-            println!("[4] Select FatBin[{}] entry", fatbin);
+            println!("[ 3] Print FatBin[{}] entries", fatbin);
+            println!("[ 4] Select FatBin[{}] entry", fatbin);
         }
 
         if entry != -1 {
-            println!("[5] Dump FatBin[{}].entry[{}]", fatbin, entry);
-            println!("[6] Print FatBin[{}].entry[{}] sections", fatbin, entry);
-            println!("[7] Select FatBin[{}].entry[{}] section", fatbin, entry);
+            println!("[ 5] Dump FatBin[{}].entry[{}]", fatbin, entry);
+            println!("[ 6] Print FatBin[{}].entry[{}] sections", fatbin, entry);
+            println!("[ 7] Select FatBin[{}].entry[{}] section", fatbin, entry);
         }
 
         if let Some(ref sec) = section {
-            println!("[8] Dump '{}' in FatBin[{}].entry[{}]", sec, fatbin, entry);
+            println!("[ 8] Dump '{}' from FatBin[{}].entry[{}]", sec, fatbin, entry);
+            println!("[ 9] Modify '{}' fron FatBin[{}].entry[{}]", sec, fatbin, entry);
+            println!("[10] Save changes");
         }
 
-        println!("[0] Exit");
+        println!("[ 0] Exit");
         separator();
         print!("> ");
         io::stdout().flush().unwrap();
         io::stdin().read_line(&mut buf).unwrap();
 
         if let Ok(choice) = buf.trim().parse() {
-            match choice {
+           match choice {
                 1 => print_fatbin_hdrs(&fatbins),
-                2 => fatbin = select_fatbin(&fatbins),
+                2 => {
+                    fatbin = select_fatbin(&fatbins);
+                    entry = -1;
+                    section = None;
+                },
                 3 => if fatbin != -1 {
                     print_fatbin_entries(&fatbins[fatbin as usize]);
                 } else {
@@ -355,34 +394,42 @@ fn main() -> io::Result<()> {
                 },
                 4 => if fatbin != -1 {
                     entry = select_fatbin_entry(&fatbins[fatbin as usize]);
+                    section = None;
                 } else {
                     invalid = 1;
                 },
-                5 => if entry != -1 && fatbin != -1 {
+                5 => if entry != -1 {
                     dump_entry(&fatbins[fatbin as usize].entries[entry as usize], &data);
                 } else {
                     invalid = 1;
                 },
-                6 => if entry != -1 && fatbin != -1 {
+                6 => if entry != -1 {
                     if let Some(sections) = list_entry_sections(&fatbins[fatbin as usize].entries[entry as usize], &data) {
                         print_entry_sections(&sections);
                     }
                 } else {
                     invalid = 1;
                 },
-                7 => if entry != -1 && fatbin != -1 {
+                7 => if entry != -1 {
                     section = select_entry_section(&fatbins[fatbin as usize].entries[entry as usize], &data);
                 } else {
                     invalid = 1;
                 },
-                8 => if entry != -1 && fatbin != -1 {
-                    if let Some(ref sec) = section {
-                        dump_entry_section(&fatbins[fatbin as usize].entries[entry as usize], &data, sec);
-                    } else {
-                        invalid = 1;
-                    }
+                8 => if let Some(ref sec) = section {
+                    dump_entry_section(&fatbins[fatbin as usize].entries[entry as usize], &data, sec);
                 } else {
                     invalid = 1;
+                },
+                9 => if let Some(ref sec) = section {
+                    modify_entry_section(&fatbins[fatbin as usize].entries[entry as usize], &mut data, sec);
+                } else {
+                    invalid = 1;
+                },
+                10 => {
+                    std::fs::write(&args.binary, &data).unwrap();
+                    separator();
+                    println!("Successfully saved changes.");
+                    separator();
                 },
                 0 => break,
                 _ => {
